@@ -1,0 +1,13 @@
+node_modules
+**/node_modules
+**/.next
+**/dist
+.git
+.env*
+coverage
+playwright-report
+test-results
+**/*.tsbuildinfo
+
+# Never needed to build or run an image (project memory, agent config, editor state).
+.obsidian

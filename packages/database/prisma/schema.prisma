@@ -1,0 +1,180 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum UserRole {
+  USER
+  ADMIN
+}
+
+enum JobStatus {
+  PENDING
+  UPLOADED
+  QUEUED
+  PROCESSING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+enum SubscriptionStatus {
+  TRIALING
+  ACTIVE
+  PAST_DUE
+  CANCELLED
+  EXPIRED
+}
+
+model User {
+  id              String            @id @default(cuid())
+  email           String            @unique
+  passwordHash    String
+  name            String
+  role            UserRole          @default(USER)
+  emailVerifiedAt DateTime?
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+  sessions        Session[]
+  jobs            Job[]
+  subscriptions   Subscription[]
+  analyticsEvents AnalyticsEvent[]
+
+  @@index([createdAt])
+}
+
+model Session {
+  id               String   @id @default(cuid())
+  tokenHash        String   @unique
+  userAgent        String?
+  ipAddress        String?
+  expiresAt        DateTime
+  revokedAt        DateTime?
+  createdAt        DateTime @default(now())
+  lastRefreshedAt  DateTime @default(now())
+  userId           String
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model Job {
+  id                String          @id @default(cuid())
+  status            JobStatus       @default(PENDING)
+  // Legacy single-source fields. Still authoritative for every single-input
+  // operation (everything Phase 7A supports) — never removed or altered. For a
+  // future multi-input job (`inputs` below is non-empty), these instead hold the
+  // FIRST input's metadata, purely for list-display purposes; the worker never
+  // reads them directly once `inputs` rows exist for a job — see
+  // `domain/job-inputs/resolve-job-inputs.ts`.
+  sourceObjectKey   String
+  sourceFileName    String
+  sourceMimeType    String
+  sourceSizeBytes   BigInt
+  operation         String?
+  options           Json
+  progress          Int             @default(0)
+  // Number of times this job has been moved into QUEUED (first submission counts as
+  // 1, each retry increments it again). Used to derive a versioned BullMQ job id
+  // (`${job.id}:${processingAttempt}`) so a retry never reuses a prior attempt's
+  // Redis job hash — see BullMqJobQueue.enqueue.
+  processingAttempt Int             @default(0)
+  errorCode         String?
+  errorMessage      String?
+  startedAt         DateTime?
+  completedAt       DateTime?
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+  userId            String
+  user              User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  processedFiles    ProcessedFile[]
+  inputs            JobInput[]
+
+  @@index([userId, createdAt])
+  @@index([status, createdAt])
+}
+
+// Additive, Phase 7A foundation for multi-input operations (image-to-pdf, Phase
+// 7F). Every job today still uses the legacy Job.source* fields directly and has
+// zero JobInput rows — nothing writes to this table yet. When a future multi-input
+// flow does, `resolveJobInputs` picks these rows (ordered by `order`) over the
+// legacy fields automatically; single-input jobs are entirely unaffected.
+model JobInput {
+  id        String   @id @default(cuid())
+  jobId     String
+  job       Job      @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  objectKey String   @unique
+  fileName  String
+  mimeType  String
+  sizeBytes BigInt
+  order     Int
+  createdAt DateTime @default(now())
+
+  @@unique([jobId, order])
+  @@index([jobId])
+}
+
+model ProcessedFile {
+  id          String   @id @default(cuid())
+  objectKey   String   @unique
+  fileName    String
+  mimeType    String
+  sizeBytes   BigInt
+  checksum    String?
+  expiresAt   DateTime?
+  createdAt   DateTime @default(now())
+  jobId       String
+  job         Job      @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@index([jobId])
+  @@index([expiresAt])
+}
+
+model Subscription {
+  id                     String             @id @default(cuid())
+  provider               String
+  providerCustomerId     String?
+  providerSubscriptionId String?            @unique
+  plan                   String
+  status                 SubscriptionStatus
+  currentPeriodStart     DateTime?
+  currentPeriodEnd       DateTime?
+  cancelAtPeriodEnd      Boolean            @default(false)
+  createdAt              DateTime           @default(now())
+  updatedAt              DateTime           @updatedAt
+  userId                 String
+  user                   User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, status])
+}
+
+model AnalyticsEvent {
+  id         String   @id @default(cuid())
+  eventName  String
+  properties Json?
+  sessionId  String?
+  occurredAt DateTime @default(now())
+  userId     String?
+  user       User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([eventName, occurredAt])
+  @@index([userId, occurredAt])
+}
+
+model SystemLog {
+  id        String   @id @default(cuid())
+  level     String
+  message   String
+  context   Json?
+  requestId String?
+  createdAt DateTime @default(now())
+
+  @@index([level, createdAt])
+  @@index([requestId])
+}
+

@@ -1,0 +1,282 @@
+name: media-platform
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: media_platform
+      POSTGRES_USER: media
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-media_dev_password}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U media -d media_platform']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:8-alpine
+    command: ['redis-server', '--appendonly', 'yes']
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  object-storage:
+    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY:-local-access-key}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:-local-secret-key}
+      # Lets the browser's direct-to-storage presigned PUT (from http://localhost, per
+      # the web app's own origin) pass MinIO's own CORS preflight — this is the
+      # externally-managed CORS path (see S3_MANAGE_BUCKET_CORS=false on the api
+      # service below), so the application never calls PutBucketCorsCommand locally.
+      MINIO_API_CORS_ALLOW_ORIGIN: http://localhost
+    ports:
+      # Only the S3 API port is published to the host — the browser needs to reach
+      # this directly for presigned uploads/downloads (see S3_PUBLIC_ENDPOINT on the
+      # api service below). The console port (9001) stays internal to the Docker
+      # network; it's not needed for the application to function.
+      - '9000:9000'
+    volumes:
+      - object_storage_data:/data
+    healthcheck:
+      test: ['CMD', 'curl', '-f', 'http://localhost:9000/minio/health/live']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/api.Dockerfile
+      # Explicit now that the Dockerfile has a later `runtime-worker` stage
+      # (LibreOffice, for the worker service only) — omitting `target` would
+      # otherwise silently default to whichever stage is *last* in the file,
+      # not this one.
+      target: runtime
+    environment:
+      NODE_ENV: production
+      API_HOST: 0.0.0.0
+      API_PORT: 4000
+      WEB_ORIGIN: http://localhost
+      ADMIN_ORIGIN: http://localhost
+      DATABASE_URL: postgresql://media:${POSTGRES_PASSWORD:-media_dev_password}@postgres:5432/media_platform?schema=public
+      REDIS_URL: redis://redis:6379
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:?Set JWT_ACCESS_SECRET}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:?Set JWT_REFRESH_SECRET}
+      ACCESS_TOKEN_TTL: 15m
+      REFRESH_TOKEN_TTL_DAYS: 30
+      # NODE_ENV stays production, but this stack is served over plain
+      # http://localhost — without this override the auth cookies' Secure attribute
+      # (driven by NODE_ENV === 'production') would stop browsers from persisting or
+      # sending them over HTTP. Real HTTPS deployments should set COOKIE_SECURE=true
+      # (or omit it, since NODE_ENV=production already defaults to secure cookies).
+      COOKIE_SECURE: 'false'
+      S3_ENDPOINT: ${S3_ENDPOINT:-http://object-storage:9000}
+      # Browser-facing endpoint for presigned upload/download URLs. Must be reachable
+      # from the host machine's browser, unlike S3_ENDPOINT above (a Docker-internal
+      # hostname). Only the S3 API port (9000) is published to the host for this.
+      S3_PUBLIC_ENDPOINT: ${S3_PUBLIC_ENDPOINT:-http://localhost:9000}
+      S3_REGION: ${S3_REGION:-us-east-1}
+      S3_BUCKET: ${S3_BUCKET:-media-platform}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-local-access-key}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-local-secret-key}
+      # CORS is managed by MinIO itself locally (MINIO_API_CORS_ALLOW_ORIGIN on the
+      # object-storage service above) — the application must not also try to manage
+      # it via PutBucketCorsCommand. Production deployments should set this to true
+      # only if CORS should be managed through the S3 API rather than externally.
+      S3_MANAGE_BUCKET_CORS: 'false'
+      MAX_UPLOAD_SIZE_BYTES: ${MAX_UPLOAD_SIZE_BYTES:-524288000}
+      # How long a presigned upload URL (and an abandoned PENDING Job row) stays
+      # valid before the stale-upload reconciliation worker considers acting on it.
+      # Must match what S3StorageService actually signs — see packages/config's doc
+      # comment. Reaching this alone is NOT sufficient to act — see the grace
+      # period below.
+      UPLOAD_URL_TTL_SECONDS: ${UPLOAD_URL_TTL_SECONDS:-900}
+      # Extra buffer, on top of UPLOAD_URL_TTL_SECONDS, before the reconciliation
+      # worker treats a PENDING or manually-cancelled upload as safe to cancel or
+      # physically delete from storage — see packages/config's doc comment for why
+      # the raw TTL alone can't rule out a still-in-flight PUT.
+      PENDING_UPLOAD_GRACE_SECONDS: ${PENDING_UPLOAD_GRACE_SECONDS:-300}
+      # Most jobs a single user may have QUEUED+PROCESSING at once — enforced only
+      # here (the api service); the worker never needs this, it just executes
+      # whatever's already been queued. See packages/config's doc comment.
+      MAX_ACTIVE_JOBS_PER_USER: ${MAX_ACTIVE_JOBS_PER_USER:-3}
+      # nginx is the one reverse proxy in front of the API, so exactly one X-Forwarded-For
+      # hop is trusted. Trusting the header blindly would let any client rotate it to dodge
+      # the per-IP rate limits. See TRUST_PROXY_HOPS in packages/config.
+      TRUST_PROXY_HOPS: 1
+      FFMPEG_PATH: /usr/bin/ffmpeg
+      LOG_LEVEL: info
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      object-storage: { condition: service_healthy }
+    # Readiness, not liveness: healthy only while Postgres, Redis and object storage are
+    # reachable. (`/health/ready` is intentionally not proxied by nginx — see nginx.conf.)
+    healthcheck:
+      test: ['CMD', 'wget', '-q', '-O', '/dev/null', 'http://127.0.0.1:4000/health/ready']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
+  # One-shot migration runner — applies committed migrations (`prisma migrate
+  # deploy`) using the `migrate` build stage, which carries the Prisma CLI and
+  # `packages/database`'s schema/migrations/config with no host bind mount needed.
+  # The `tools` profile keeps this out of `docker compose up`'s default service set,
+  # so migrations never run automatically or concurrently from an api/worker
+  # replica's own startup — run it explicitly, once, before rolling out api/worker:
+  #   docker compose run --rm migrate
+  migrate:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/api.Dockerfile
+      target: migrate
+    profiles: ['tools']
+    environment:
+      DATABASE_URL: postgresql://media:${POSTGRES_PASSWORD:-media_dev_password}@postgres:5432/media_platform?schema=public
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  worker:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/api.Dockerfile
+      # The only service built from this target: adds headless LibreOffice
+      # (document-to-pdf) on top of the plain `runtime` stage the api service
+      # uses — see that stage's own comment for why it's kept out of `runtime`
+      # itself. FFmpeg is already installed there too, reused unchanged.
+      target: runtime-worker
+    # Runs the queue consumer entrypoint instead of the HTTP server. Path
+    # matches this Dockerfile's own CMD convention (apps/api/dist/server.js
+    # relative to WORKDIR /app) — the build stage's `npm run build -w
+    # @media/api` produces apps/api/dist/worker.js alongside server.js from
+    # tsup's dual entry point.
+    command: ['node', 'apps/api/dist/worker.js']
+    # Identical environment block to the api service above (this task's own
+    # instructions call for that, and it keeps the two images' config from drifting
+    # apart) — the worker doesn't strictly need API_HOST/API_PORT/WEB_ORIGIN/
+    # ADMIN_ORIGIN, but there's no harm in it having them, and matching exactly means
+    # the (separate) worker task never needs to revisit this file.
+    environment:
+      NODE_ENV: production
+      API_HOST: 0.0.0.0
+      API_PORT: 4000
+      WEB_ORIGIN: http://localhost
+      ADMIN_ORIGIN: http://localhost
+      DATABASE_URL: postgresql://media:${POSTGRES_PASSWORD:-media_dev_password}@postgres:5432/media_platform?schema=public
+      REDIS_URL: redis://redis:6379
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:?Set JWT_ACCESS_SECRET}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:?Set JWT_REFRESH_SECRET}
+      ACCESS_TOKEN_TTL: 15m
+      REFRESH_TOKEN_TTL_DAYS: 30
+      S3_ENDPOINT: ${S3_ENDPOINT:-http://object-storage:9000}
+      # Browser-facing endpoint for presigned upload/download URLs. Must be reachable
+      # from the host machine's browser, unlike S3_ENDPOINT above (a Docker-internal
+      # hostname). Only the S3 API port (9000) is published to the host for this.
+      S3_PUBLIC_ENDPOINT: ${S3_PUBLIC_ENDPOINT:-http://localhost:9000}
+      S3_REGION: ${S3_REGION:-us-east-1}
+      S3_BUCKET: ${S3_BUCKET:-media-platform}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-local-access-key}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-local-secret-key}
+      # CORS is managed by MinIO itself locally (MINIO_API_CORS_ALLOW_ORIGIN on the
+      # object-storage service above) — the application must not also try to manage
+      # it via PutBucketCorsCommand. Production deployments should set this to true
+      # only if CORS should be managed through the S3 API rather than externally.
+      S3_MANAGE_BUCKET_CORS: 'false'
+      MAX_UPLOAD_SIZE_BYTES: ${MAX_UPLOAD_SIZE_BYTES:-524288000}
+      # How long a presigned upload URL (and an abandoned PENDING Job row) stays
+      # valid before the stale-upload reconciliation worker considers acting on it.
+      # Must match what S3StorageService actually signs — see packages/config's doc
+      # comment. Reaching this alone is NOT sufficient to act — see the grace
+      # period below.
+      UPLOAD_URL_TTL_SECONDS: ${UPLOAD_URL_TTL_SECONDS:-900}
+      # Extra buffer, on top of UPLOAD_URL_TTL_SECONDS, before the reconciliation
+      # worker treats a PENDING or manually-cancelled upload as safe to cancel or
+      # physically delete from storage — see packages/config's doc comment for why
+      # the raw TTL alone can't rule out a still-in-flight PUT.
+      PENDING_UPLOAD_GRACE_SECONDS: ${PENDING_UPLOAD_GRACE_SECONDS:-300}
+      FFMPEG_PATH: /usr/bin/ffmpeg
+      LOG_LEVEL: info
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      object-storage: { condition: service_healthy }
+    # The worker has no public listener; it serves a small private health endpoint
+    # (WORKER_HEALTH_PORT, default 4001, never published). Ready means Postgres and
+    # Redis are reachable and both BullMQ consumers are running.
+    healthcheck:
+      test: ['CMD', 'wget', '-q', '-O', '/dev/null', 'http://127.0.0.1:4001/health/ready']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/web.Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: /api/v1
+        NEXT_PUBLIC_ADMIN_URL: /admin
+    environment:
+      NEXT_PUBLIC_API_URL: /api/v1
+      NEXT_PUBLIC_ADMIN_URL: /admin
+    healthcheck:
+      test: ['CMD', 'wget', '-q', '-O', '/dev/null', 'http://127.0.0.1:3000/']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+
+  admin:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/admin.Dockerfile
+    healthcheck:
+      test: ['CMD', 'wget', '-q', '-O', '/dev/null', 'http://127.0.0.1:3001/admin/login']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:1.29-alpine
+    ports:
+      - '80:80'
+    volumes:
+      - ./infrastructure/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    # Start only once every upstream is healthy, so a cold `up` no longer races nginx's
+    # startup-time DNS resolution of api/web/admin into a 502. (Recreating an upstream
+    # later still needs `docker compose restart nginx` — see docs/PRODUCTION.md.)
+    depends_on:
+      api: { condition: service_healthy }
+      web: { condition: service_healthy }
+      admin: { condition: service_healthy }
+    # Proves nginx -> api end to end via the public liveness alias.
+    healthcheck:
+      test: ['CMD', 'wget', '-q', '-O', '/dev/null', 'http://127.0.0.1/health']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+  object_storage_data:

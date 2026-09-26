@@ -1,0 +1,45 @@
+{
+  "name": "@media/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "dev:worker": "tsx watch src/worker.ts",
+    "build": "tsup",
+    "start": "node dist/server.js",
+    "start:worker": "node dist/worker.js",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.1134.0",
+    "@aws-sdk/s3-request-presigner": "^3.1134.0",
+    "@fastify/cookie": "^11.0.2",
+    "@fastify/cors": "^11.1.0",
+    "@fastify/helmet": "^13.0.2",
+    "@fastify/rate-limit": "^10.3.0",
+    "@media/config": "*",
+    "@media/database": "*",
+    "@media/types": "*",
+    "@media/validation": "*",
+    "bcrypt": "^6.0.0",
+    "bullmq": "^5.58.0",
+    "dotenv": "^17.2.2",
+    "fastify": "^5.12.3",
+    "fastify-plugin": "^5.1.0",
+    "ioredis": "^5.7.0",
+    "ipaddr.js": "^2.2.0",
+    "jose": "^6.1.0",
+    "pdf-lib": "^1.17.1",
+    "pino": "^10.3.1",
+    "zod": "^4.6.1"
+  },
+  "devDependencies": {
+    "@types/bcrypt": "^6.0.0",
+    "tsup": "^8.5.0",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.3",
+    "vitest": "^5.0.0"
+  }
+}

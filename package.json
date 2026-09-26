@@ -1,0 +1,43 @@
+{
+  "name": "media-platform",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Production-ready media processing SaaS monorepo",
+  "engines": {
+    "node": "^22.12.0 || >=24.0.0",
+    "npm": ">=10.0.0"
+  },
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run db:generate && npm run build --workspaces --if-present",
+    "dev": "concurrently -n api,web,admin -c cyan,magenta,yellow \"npm run dev -w @media/api\" \"npm run dev -w @media/web\" \"npm run dev -w @media/admin\"",
+    "lint": "eslint . --max-warnings=0",
+    "typecheck": "npm run db:generate && npm run typecheck --workspaces --if-present",
+    "test": "npm run db:generate && npm run test --workspaces --if-present",
+    "test:e2e": "playwright test",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "db:generate": "npm run generate -w @media/database",
+    "db:migrate": "npm run migrate -w @media/database",
+    "db:deploy": "npm run deploy -w @media/database",
+    "docker:up": "docker compose up --build",
+    "docker:down": "docker compose down"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.35.0",
+    "@playwright/test": "^1.63.0",
+    "@types/node": "^24.3.0",
+    "concurrently": "^9.2.1",
+    "eslint": "^9.35.0",
+    "eslint-config-next": "^16.3.4",
+    "eslint-config-prettier": "^10.1.8",
+    "globals": "^16.4.0",
+    "prettier": "^3.6.2",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.42.0",
+    "vitest": "^5.0.0"
+  }
+}

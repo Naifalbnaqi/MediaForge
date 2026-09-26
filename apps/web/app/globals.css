@@ -1,0 +1,34 @@
+@import 'tailwindcss';
+
+/*
+ * The shared UI package (Button, LoadingState, ErrorState) lives outside apps/web, so
+ * Tailwind's automatic source detection never sees its class names — utilities used only
+ * there (min-h-11, the red danger button, ...) would silently not be generated.
+ */
+@source '../../../packages/ui/src';
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+  color-scheme: light;
+  --background: #f8fafc;
+  --foreground: #111827;
+}
+
+:root.dark {
+  color-scheme: dark;
+  --background: #080b14;
+  --foreground: #f8fafc;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+body {
+  background: var(--background);
+  color: var(--foreground);
+}
+button,
+a {
+  -webkit-tap-highlight-color: transparent;
+}
