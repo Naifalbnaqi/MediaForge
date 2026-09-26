@@ -159,10 +159,6 @@ packages/
 infrastructure/
   docker/               API/worker, web and admin Dockerfiles
   nginx/                reference reverse proxy
-docs/                   architecture and production guides
-infrastructure/
-  docker/               API/worker, web and admin Dockerfiles
-  nginx/                reference reverse proxy
 docs/                   architecture and production guides```
 
 Inside the API, dependencies point inward: routes call application services; services depend on
